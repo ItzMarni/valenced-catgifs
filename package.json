@@ -1,0 +1,29 @@
+{
+  "name": "valenced-catgifs",
+  "version": "0.2.2",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "valenced-plugin build catgifs && node scripts/package.mjs",
+    "build:dev": "valenced-plugin build catgifs --dev && node scripts/package.mjs",
+    "typecheck": "tsc --noEmit -p plugins/catgifs",
+    "test": "valenced-plugin build catgifs && node scripts/package.mjs && node --experimental-strip-types --test tests/*.test.ts"
+  },
+  "devDependencies": {
+    "@gorhom/bottom-sheet": "5.2.14",
+    "@shopify/flash-list": "2.3.2",
+    "@types/react": "^19.2.18",
+    "@valenced/plugin-cli": "git+https://github.com/Valenced/valenced-plugin-cli.git#c8854005208fa29c0f56eac265fd596320a48713",
+    "@valenced/types": "git+https://github.com/Valenced/valenced-types.git#8c63656dcde4c22a61868896115e10d13c1ebc55",
+    "fflate": "^0.8.3",
+    "react": "19.2.3",
+    "react-native": "0.86.0",
+    "react-test-renderer": "19.2.3",
+    "typescript": "^7.0.2"
+  },
+  "trustedDependencies": ["@valenced/plugin-cli", "@swc/core"]
+}
