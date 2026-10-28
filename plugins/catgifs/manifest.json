@@ -4,7 +4,7 @@
   "name": "CatGIFs",
   "description": "Add CatGIFs beside Emoji, GIFs, and Stickers in the mobile expression picker.",
   "author": "marni_ <282905846457827330>",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "icon": "GifIcon",
   "dependencies": {
     "valenced.api": { "version": ">=1 <2" },
