@@ -15,11 +15,10 @@ import type { Settings } from './settings';
 
 export interface PickerProps {
   storage: JsonStorage<Settings>;
-  inActionSheet: boolean;
   onSelect(url: string): Promise<string | null>;
 }
 
-export default function CatGIFsPanel({ storage, onSelect, inActionSheet }: PickerProps) {
+export default function CatGIFsPanel({ storage, onSelect }: PickerProps) {
   const { apiEndpoint } = { ...DEFAULT_SETTINGS, ...storage.use() };
   const [width, setWidth] = useState(0);
   const [gifs, setGifs] = useState<GifItem[]>([]);
@@ -87,7 +86,7 @@ export default function CatGIFsPanel({ storage, onSelect, inActionSheet }: Picke
           <Design.Text variant="text-md/normal" color="text-muted">
             {query.trim() ? 'No GIFs match your search.' : 'No GIFs available.'}
           </Design.Text>
-        </View> : width > 0 ? <NativeGifList items={visible} width={width} inActionSheet={inActionSheet}
+        </View> : width > 0 ? <NativeGifList items={visible} width={width}
           onSelect={url => { void onSelect(url).then(error => setSelectionError(error ?? '')); }} /> : null}
     </View>
   );

@@ -12,6 +12,7 @@ const bundle = readFileSync(new URL('../plugins/catgifs/build/js/index.js', impo
 afterEach(() => mock.restoreAll());
 
 function harness({ deferPicker = false, nativeListReady = true, messagesReady = true } = {}) {
+  const SheetContext = React.createContext<object | null>({});
   let channel: string | undefined = 'channel-a';
   let availableInput = true;
   let closed = 0;
@@ -49,7 +50,13 @@ function harness({ deferPicker = false, nativeListReady = true, messagesReady = 
     } },
     components: { SearchInput: 'search-input' },
     assets: { getAssetIdByName: () => 1 },
-    externals: { Gorhom: { BottomSheet: { BottomSheetScrollView: 'bottom-sheet-scroll-view' } }, Shopify: { FlashList: {
+    externals: { Gorhom: { BottomSheet: {
+      BottomSheetScrollView: 'bottom-sheet-scroll-view',
+      useBottomSheetInternal: (unsafe: boolean) => {
+        assert.equal(unsafe, true);
+        return React.useContext(SheetContext);
+      },
+    } }, Shopify: { FlashList: {
       FlashList: 'flash-list',
       useRecyclingState: (initial: unknown) => React.useState(initial),
     } } },
@@ -111,7 +118,7 @@ function harness({ deferPicker = false, nativeListReady = true, messagesReady = 
   }
   function stop() { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); }
   const props = { channel: { id: 'channel-a' }, expressionType: 'emoji' };
-  return { init, stop, Picker, original, props, drafts, sent, storage, getClosed: () => closed,
+  return { init, stop, Picker, original, props, drafts, sent, storage, SheetContext, getClosed: () => closed,
     finishPicker: () => finishPicker(), finishNativeList: () => finishNativeList(), setChannel: (id?: string) => { channel = id; },
     setInput: (available: boolean) => { availableInput = available; },
     setSendResult: (result: () => unknown) => { sendResult = result; } };
@@ -177,6 +184,42 @@ test('embedded grid measures its parent, preserves GIF proportions, searches, an
   await act(async () => { panel.props.onLayout({ nativeEvent: { layout: { width: 800 } } }); });
   assert.equal(renderer.root.findByType('native-gif-list').props.columns, 4);
   await act(async () => { h.stop(); renderer.unmount(); });
+});
+
+test('expanding and collapsing uses the current scroll owner for native and fallback grids', async () => {
+  for (const nativeListReady of [true, false]) {
+    const h = harness({ nativeListReady });
+    h.init();
+    // The keyboard flag can stay true when its contents move into a sheet.
+    const picker = React.createElement(h.Picker, { ...h.props, inPortalKeyboard: true });
+    const tree = (sheet: object | null) => React.createElement(h.SheetContext.Provider, { value: sheet }, picker);
+    let renderer;
+    await act(async () => { renderer = create(tree(null)); });
+    await act(async () => { renderer.root.findByType('segmented-control').props.state.setActiveIndex(3); });
+    const panel = renderer.root.findAllByType('native-view').find(node => node.props.onLayout);
+    await act(async () => { panel.props.onLayout({ nativeEvent: { layout: { width: 368 } } }); });
+    for (const sheet of [null, {}, null, {}]) {
+      await act(async () => { renderer.update(tree(sheet)); });
+      if (nativeListReady) {
+        assert.equal(renderer.root.findByType('native-gif-list').props.inActionSheet, sheet !== null);
+      } else {
+        const list = renderer.root.findByType('flash-list');
+        assert.equal(typeof list.props.renderScrollComponent, sheet ? 'function' : 'undefined');
+        if (sheet) {
+          let scroll;
+          await act(async () => { scroll = create(React.createElement(list.props.renderScrollComponent, { testID: 'gif-scroll' })); });
+          assert.equal(scroll.root.findByType('bottom-sheet-scroll-view').props.testID, 'gif-scroll');
+          await act(async () => { scroll.unmount(); });
+        }
+      }
+      assert.equal(renderer.root.findByType('segmented-control').props.state.activeIndex.value, 3);
+    }
+    if (!nativeListReady) {
+      await act(async () => { h.finishNativeList(); });
+      assert.equal(renderer.root.findByType('native-gif-list').props.inActionSheet, true);
+    }
+    await act(async () => { h.stop(); renderer.unmount(); });
+  }
 });
 
 test('direct sending works without a chat input and never edits the draft', async () => {

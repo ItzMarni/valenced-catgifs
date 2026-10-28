@@ -116,7 +116,6 @@ export default function ExtendedExpressionPicker({ Native, nativeProps, runtime 
   const channelId = nativeProps.channel?.id;
   const body = selected
     ? cloneElement(parts.body, undefined, <CatGIFsPanel key={channelId} storage={runtime.storage}
-        inActionSheet={!nativeProps.inPortalKeyboard}
         onSelect={url => runtime.select(channelId, url)} />)
     : parts.body;
   return cloneElement(parts.root, undefined,

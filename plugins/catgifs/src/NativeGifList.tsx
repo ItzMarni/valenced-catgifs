@@ -27,12 +27,14 @@ function SheetScrollView(props: ScrollViewProps) {
   return <Gorhom.BottomSheetScrollView {...props} children={props.children} />;
 }
 
-export default function NativeGifList({ items, width, inActionSheet, onSelect }: {
+export default function NativeGifList({ items, width, onSelect }: {
   items: GifItem[];
   width: number;
-  inActionSheet: boolean;
   onSelect(url: string): void;
 }) {
+  // Expanding the portal keyboard can put the picker inside a bottom sheet
+  // without changing its keyboard props. Use the actual scroll owner instead.
+  const inActionSheet = Gorhom.useBottomSheetInternal(true) !== null;
   const [Results, setResults] = useState(() => lookupModuleWithImportedPath<ResultsModule>(RESULTS_PATH)[0]?.default);
   useEffect(() => {
     if (Results) return;
