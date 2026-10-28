@@ -17,6 +17,7 @@ function harness({ deferPicker = false, nativeListReady = true, messagesReady = 
   let availableInput = true;
   let closed = 0;
   const drafts: string[] = [];
+  const errors: unknown[][] = [];
   const sent: { channelId: string; message: { content: string }; clearDraft: boolean; options: { location: string } }[] = [];
   let sendResult: () => unknown = () => undefined;
   const cleanups: (() => void)[] = [];
@@ -97,7 +98,7 @@ function harness({ deferPicker = false, nativeListReady = true, messagesReady = 
           return () => {};
         }
         callback({ getBestActiveInputForChannelId: (id: string) => {
-          assert.equal(id, 'channel-a');
+          assert.equal(id, channel);
           return availableInput ? {
             insertText: (text: string) => drafts.push(text), closeCustomKeyboard: () => { closed++; },
           } : undefined;
@@ -114,11 +115,11 @@ function harness({ deferPicker = false, nativeListReady = true, messagesReady = 
   const options = new Function('valenced', 'plugin', `return ${bundle}`)(host, (value: unknown) => value).default;
   function init() {
     options.init({ cleanup: (...items: (() => void)[]) => cleanups.push(...items), jsonStorage: storage,
-      logger: { error() {}, warn() {} } });
+      logger: { error(...args: unknown[]) { errors.push(args); }, warn() {} } });
   }
   function stop() { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); }
   const props = { channel: { id: 'channel-a' }, expressionType: 'emoji' };
-  return { init, stop, Picker, original, props, drafts, sent, storage, SheetContext, getClosed: () => closed,
+  return { init, stop, Picker, original, props, drafts, errors, sent, storage, SheetContext, getClosed: () => closed,
     finishPicker: () => finishPicker(), finishNativeList: () => finishNativeList(), setChannel: (id?: string) => { channel = id; },
     setInput: (available: boolean) => { availableInput = available; },
     setSendResult: (result: () => unknown) => { sendResult = result; } };
@@ -240,32 +241,68 @@ test('direct sending works without a chat input and never edits the draft', asyn
   await act(async () => { h.stop(); renderer.unmount(); });
 });
 
-test('unavailable send action and failed sends show an error and keep the picker open', async () => {
-  for (const messagesReady of [false, true]) {
-    const h = harness({ messagesReady });
+test('unavailable sends, changed chats, and synchronous failures show an error without closing', async () => {
+  for (const failure of ['unavailable', 'channel', 'throw']) {
+    const h = harness({ messagesReady: failure !== 'unavailable' });
     h.init();
-    h.setSendResult(() => Promise.reject(new Error('Offline')));
+    h.setSendResult(() => { throw new Error('Send failed synchronously'); });
     let renderer;
     await act(async () => { renderer = create(React.createElement(h.Picker, h.props)); });
     await act(async () => { renderer.root.findByType('segmented-control').props.state.setActiveIndex(3); });
     const panel = renderer.root.findAllByType('native-view').find(node => node.props.onLayout);
     await act(async () => { panel.props.onLayout({ nativeEvent: { layout: { width: 368 } } }); });
     const list = renderer.root.findByType('native-gif-list');
+    if (failure === 'channel') h.setChannel('different-chat');
     await act(async () => { list.props.onPressGIF(list.props.resultItems[0]); });
-    assert.equal(h.sent.length, messagesReady ? 1 : 0);
+    assert.equal(h.sent.length, failure === 'throw' ? 1 : 0);
     assert.equal(h.getClosed(), 0);
     assert.deepEqual(h.drafts, []);
-    assert.ok(renderer.root.findAllByType('design-text').some(node => /not ready to send|Could not send/.test(String(node.props.children))));
+    const expectedError = failure === 'unavailable' ? /not ready to send/ :
+      failure === 'channel' ? /active chat changed/ : /Could not send/;
+    assert.ok(renderer.root.findAllByType('design-text').some(node => expectedError.test(String(node.props.children))));
     await act(async () => { h.stop(); renderer.unmount(); });
   }
 });
 
-test('finishing an earlier send cannot close a different chat or a disabled picker', async () => {
-  for (const change of ['channel', 'disable']) {
+test('selection closes immediately and finishing the send never closes a subsequent picker', async () => {
+  for (const change of ['reopen', 'channel', 'disable']) {
     const h = harness();
     h.init();
-    let finish;
-    h.setSendResult(() => new Promise(resolve => { finish = resolve; }));
+    const { promise, resolve } = Promise.withResolvers<void>();
+    h.setSendResult(() => promise);
+    let renderer;
+    await act(async () => { renderer = create(React.createElement(h.Picker, h.props)); });
+    await act(async () => { renderer.root.findByType('segmented-control').props.state.setActiveIndex(3); });
+    const panel = renderer.root.findAllByType('native-view').find(node => node.props.onLayout);
+    await act(async () => { panel.props.onLayout({ nativeEvent: { layout: { width: 368 } } }); });
+    const list = renderer.root.findByType('native-gif-list');
+    await act(async () => {
+      list.props.onPressGIF(list.props.resultItems[0]);
+      assert.equal(h.getClosed(), 1);
+    });
+    assert.equal(h.sent.length, 1);
+    if (change === 'disable') await act(async () => { h.stop(); });
+    else {
+      await act(async () => { renderer.unmount(); });
+      if (change === 'channel') h.setChannel('different-chat');
+      const props = change === 'channel' ? { ...h.props, channel: { id: 'different-chat' } } : h.props;
+      await act(async () => { renderer = create(React.createElement(h.Picker, props)); });
+      await act(async () => { renderer.root.findByType('segmented-control').props.state.setActiveIndex(3); });
+    }
+    await act(async () => { resolve(); });
+    assert.equal(h.getClosed(), 1);
+    assert.deepEqual(h.errors, []);
+    await act(async () => { h.stop(); renderer.unmount(); });
+  }
+});
+
+test('keep picker open applies while sending and after success or asynchronous failure', async () => {
+  for (const fails of [false, true]) {
+    const h = harness();
+    h.init();
+    h.storage.cache.keepPickerOpen = true;
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    h.setSendResult(() => promise);
     let renderer;
     await act(async () => { renderer = create(React.createElement(h.Picker, h.props)); });
     await act(async () => { renderer.root.findByType('segmented-control').props.state.setActiveIndex(3); });
@@ -274,10 +311,44 @@ test('finishing an earlier send cannot close a different chat or a disabled pick
     const list = renderer.root.findByType('native-gif-list');
     await act(async () => { list.props.onPressGIF(list.props.resultItems[0]); });
     assert.equal(h.sent.length, 1);
-    if (change === 'channel') h.setChannel('different-chat');
-    else await act(async () => { h.stop(); });
-    await act(async () => { finish(); });
     assert.equal(h.getClosed(), 0);
+    // A setting change during the request must not trigger a delayed dismissal.
+    h.storage.cache.keepPickerOpen = false;
+    await act(async () => { if (fails) reject(new Error('Offline')); else resolve(); });
+    assert.equal(h.getClosed(), 0);
+    assert.equal(h.errors.length, fails ? 1 : 0);
+    assert.equal(renderer.root.findAllByType('design-text').some(node => /Could not send/.test(String(node.props.children))), fails);
+    await act(async () => { h.stop(); renderer.unmount(); });
+  }
+});
+
+test('asynchronous failures after dismissal are caught without reopening or dismissing a new picker', async () => {
+  for (const reopened of [false, true]) {
+    const h = harness();
+    h.init();
+    const { promise, reject } = Promise.withResolvers<void>();
+    const failure = new Error('Offline');
+    h.setSendResult(() => promise);
+    let renderer;
+    await act(async () => { renderer = create(React.createElement(h.Picker, h.props)); });
+    await act(async () => { renderer.root.findByType('segmented-control').props.state.setActiveIndex(3); });
+    const panel = renderer.root.findAllByType('native-view').find(node => node.props.onLayout);
+    await act(async () => { panel.props.onLayout({ nativeEvent: { layout: { width: 368 } } }); });
+    const list = renderer.root.findByType('native-gif-list');
+    await act(async () => { list.props.onPressGIF(list.props.resultItems[0]); });
+    assert.equal(h.getClosed(), 1);
+    await act(async () => { renderer.unmount(); });
+    if (reopened) {
+      await act(async () => { renderer = create(React.createElement(h.Picker, h.props)); });
+      await act(async () => { renderer.root.findByType('segmented-control').props.state.setActiveIndex(3); });
+    }
+    await act(async () => { reject(failure); });
+    assert.deepEqual(h.errors, [['Could not send CatGIF', failure]]);
+    assert.equal(h.getClosed(), 1);
+    if (reopened) {
+      assert.equal(renderer.root.findByType('segmented-control').props.state.activeIndex.value, 3);
+      assert.equal(renderer.root.findAllByType('design-text').some(node => /Could not send/.test(String(node.props.children))), false);
+    } else assert.equal(renderer.toJSON(), null);
     await act(async () => { h.stop(); renderer.unmount(); });
   }
 });

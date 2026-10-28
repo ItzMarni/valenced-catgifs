@@ -46,15 +46,17 @@ export default plugin<{ jsonStorage: Settings }>({
         if (!channelId || selectedChannel?.getChannelId() !== channelId) return 'The active chat changed. Reopen CatGIFs in your chat.';
         if (!messages) return 'Discord is not ready to send messages. Close the picker and try again.';
         try {
-          await messages.sendMessage(channelId, { content: url }, false, { location: 'gif_reply' });
+          const sending = messages.sendMessage(channelId, { content: url }, false, { location: 'gif_reply' });
+          // Dismiss on selection instead of waiting for the server to confirm the send.
+          if (runtime.active && selectedChannel?.getChannelId() === channelId &&
+              !(storage.cache?.keepPickerOpen ?? DEFAULT_SETTINGS.keepPickerOpen)) {
+            try { inputs?.getBestActiveInputForChannelId(channelId)?.closeCustomKeyboard(); }
+            catch (error) { logger.warn('Could not close the expression picker', error); }
+          }
+          await sending;
         } catch (error) {
           logger.error('Could not send CatGIF', error);
           return 'Could not send this GIF. Please try again.';
-        }
-        if (runtime.active && selectedChannel?.getChannelId() === channelId &&
-            !(storage.cache?.keepPickerOpen ?? DEFAULT_SETTINGS.keepPickerOpen)) {
-          try { inputs?.getBestActiveInputForChannelId(channelId)?.closeCustomKeyboard(); }
-          catch (error) { logger.warn('Could not close the expression picker', error); }
         }
         return null;
       },
