@@ -13,6 +13,14 @@ CatGIFs uses Discord's native GIF results grid, matching the layout and scrollin
 
 The **API Base URL** setting defaults to `https://catgifs.marni.cc`; the plugin loads the GIF library from `/api/gifs` on that server. Search matches GIF filenames.
 
+## Upload GIFs
+
+In the plugin settings, tap **Connect to CatGIFs** and approve this device in your browser. Then long-press an image or GIF message and choose **Upload to CatGIFs**. Uploads go to the same review queue as the desktop plugin.
+
+If the browser does not open, tap **Open approval page** or copy the displayed approval URL into your browser. Keep the settings screen open while approving. **Cancel connection** lets you stop and try again.
+
+You can also paste a direct image or GIF URL into the plugin settings and tap **Upload to CatGIFs**. Upload connections support `https://catgifs.marni.cc` and localhost, matching the desktop plugin. **Remove local token** disconnects this client; use **Manage connected devices** to revoke the token on CatGIFs.
+
 ## Install
 
 Download the plugin ZIP from [Releases](https://github.com/ItzMarni/valenced-catgifs/releases) and transfer it to your device. In **Settings > Valenced > Plugins**, open the settings gear and choose **Install from file**. Enable CatGIFs after installing. Reload Discord after installing an updated build.

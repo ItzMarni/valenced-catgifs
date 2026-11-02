@@ -6,10 +6,11 @@ import * as React from 'react';
 import * as ReactJSXRuntime from 'react/jsx-runtime';
 import { act, create } from 'react-test-renderer';
 import { strFromU8, unzipSync } from 'fflate';
+import type { Settings } from '../plugins/catgifs/src/settings';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const bundle = readFileSync(new URL('../plugins/catgifs/build/js/index.js', import.meta.url), 'utf8');
-afterEach(() => mock.restoreAll());
+afterEach(() => { mock.restoreAll(); mock.timers.reset(); });
 
 function harness({ deferPicker = false, nativeListReady = true, messagesReady = true } = {}) {
   const SheetContext = React.createContext<object | null>({});
@@ -21,7 +22,22 @@ function harness({ deferPicker = false, nativeListReady = true, messagesReady = 
   const sent: { channelId: string; message: { content: string }; clearDraft: boolean; options: { location: string } }[] = [];
   let sendResult: () => unknown = () => undefined;
   const cleanups: (() => void)[] = [];
-  const storage = { cache: { keepPickerOpen: false }, use: () => ({ apiEndpoint: 'https://catgifs.marni.cc', keepPickerOpen: false }) };
+  const storageListeners = new Set<() => void>();
+  const storage = {
+    cache: { apiEndpoint: 'https://catgifs.marni.cc', keepPickerOpen: false } as Settings,
+    use() {
+      return React.useSyncExternalStore(listener => {
+        storageListeners.add(listener);
+        return () => { storageListeners.delete(listener); };
+      }, () => storage.cache);
+    },
+    async set(value: Partial<Settings>) {
+      storage.cache = { ...storage.cache, ...value };
+      for (const listener of storageListeners) listener();
+    },
+  };
+  const openedURLs: string[] = [];
+  const browser = { async openURL(url: string) { openedURLs.push(url); } };
   mock.method(globalThis, 'fetch', async (url: string) => {
     if (url.endsWith('/api/gifs')) return Response.json(['/wide-cat.gif', '/portrait-cat.gif']);
     const [width, height] = url.includes('wide') ? [400, 200] : [200, 400];
@@ -45,9 +61,17 @@ function harness({ deferPicker = false, nativeListReady = true, messagesReady = 
   const original = Picker.type;
   let finishPicker = () => {};
   let finishNativeList = () => {};
+  const sheets = {
+    hideActionSheet() {},
+    async openLazy(loader: Promise<object> | (() => Promise<object>), key: string, props: object) {
+      return { module: await (typeof loader === 'function' ? loader() : loader), key, props };
+    },
+  };
+  const originalOpenLazy = sheets.openLazy;
   const host = {
     react: { React, ReactJSXRuntime, ReactNative: {
       View: 'native-view', Image: 'native-image', Pressable: 'pressable', ActivityIndicator: 'spinner',
+      ScrollView: 'scroll-view', Text: 'native-text', Linking: browser,
     } },
     components: { SearchInput: 'search-input' },
     assets: { getAssetIdByName: () => 1 },
@@ -62,7 +86,8 @@ function harness({ deferPicker = false, nativeListReady = true, messagesReady = 
       useRecyclingState: (initial: unknown) => React.useState(initial),
     } } },
     discord: {
-      design: { Design: { Text: 'design-text', Button: 'design-button', IconButton: 'icon-button' } },
+      design: { Design: { Text: 'design-text', Button: 'design-button', IconButton: 'icon-button', ActionSheetRow: 'action-sheet-row',
+        TextInput: 'text-input', TableRowGroup: 'row-group', TableSwitchRow: 'switch-row' } },
       flux: { getStore(_name: string, callback: (value: object) => void) {
         callback({ getChannelId: () => channel });
         return () => {};
@@ -87,6 +112,7 @@ function harness({ deferPicker = false, nativeListReady = true, messagesReady = 
     modules: { finders: {
       filters: { withProps: (...props: string[]) => props },
       getModules(filter: string[], callback: (value: object) => void) {
+        if (filter.includes('openLazy')) { callback(sheets); return () => {}; }
         if (filter.includes('sendMessage')) {
           if (messagesReady) callback({
             receiveMessage() {},
@@ -113,21 +139,44 @@ function harness({ deferPicker = false, nativeListReady = true, messagesReady = 
     } },
   };
   const options = new Function('valenced', 'plugin', `return ${bundle}`)(host, (value: unknown) => value).default;
-  function init() {
-    options.init({ cleanup: (...items: (() => void)[]) => cleanups.push(...items), jsonStorage: storage,
+  function start() {
+    options.start({ cleanup: (...items: (() => void)[]) => cleanups.push(...items), jsonStorage: storage,
       logger: { error(...args: unknown[]) { errors.push(args); }, warn() {} } });
   }
   function stop() { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); }
   const props = { channel: { id: 'channel-a' }, expressionType: 'emoji' };
-  return { init, stop, Picker, original, props, drafts, errors, sent, storage, SheetContext, getClosed: () => closed,
+  return { start, stop, options, Picker, original, props, drafts, errors, sent, storage, SheetContext, getClosed: () => closed,
+    sheets, originalOpenLazy,
+    SettingsComponent: options.SettingsComponent, browser, openedURLs,
     finishPicker: () => finishPicker(), finishNativeList: () => finishNativeList(), setChannel: (id?: string) => { channel = id; },
     setInput: (available: boolean) => { availableInput = available; },
     setSendResult: (result: () => unknown) => { sendResult = result; } };
 }
 
+test('startup yields before reporting Started so Valenced can register the settings route', async () => {
+  const h = harness();
+  const routes = new Map();
+  const listeners: (() => void)[] = [];
+  // Valenced 1.2.4 emits Started in finally. An init-only plugin skips the
+  // awaited start callback and emits before the settings listener is installed.
+  async function startPlugin() {
+    try {
+      if (!h.options.start) return;
+      await h.start();
+    } finally {
+      for (const listener of listeners) listener();
+    }
+  }
+  const starting = startPlugin();
+  listeners.push(() => routes.set('cc.marni.catgifs', h.options.SettingsComponent));
+  await starting;
+  assert.equal(routes.get('cc.marni.catgifs'), h.SettingsComponent);
+  h.stop();
+});
+
 test('native picker gains one CatGIFs tab, switches pages, and restores native tabs on disable', async () => {
   const h = harness();
-  h.init();
+  h.start();
   let renderer;
   await act(async () => { renderer = create(React.createElement(h.Picker, h.props)); });
   const control = () => renderer.root.findByType('segmented-control').props.state;
@@ -152,9 +201,117 @@ test('native picker gains one CatGIFs tab, switches pages, and restores native t
   await act(async () => { renderer.unmount(); });
 });
 
+test('settings render failures show a readable native error instead of an empty page', async () => {
+  const h = harness();
+  mock.method(console, 'error', () => {});
+  mock.method(h.storage, 'use', () => { throw new Error('Settings storage is unavailable'); });
+  let renderer;
+  await act(async () => { renderer = create(React.createElement(h.SettingsComponent, { api: { jsonStorage: h.storage } })); });
+  assert.deepEqual(renderer.root.findAllByType('native-text').map(node => node.props.children),
+    ['CatGIFs settings could not open', 'Settings storage is unavailable']);
+  assert.equal(renderer.root.findByType('scroll-view').props.style.flex, 1);
+  await act(async () => { renderer.unmount(); });
+});
+
+test('settings connect button opens approval, displays a manual link, and saves the authorized account', async () => {
+  const h = harness();
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const approvalURL = 'https://catgifs.marni.cc/settings/equicord?code=CAT-CODE';
+  mock.method(globalThis, 'fetch', async (url: string) => {
+    if (url.endsWith('/device')) return Response.json({
+      device_code: 'device-code', user_code: 'CAT-CODE', verification_uri_complete: approvalURL, expires_in: 600, interval: 5,
+    });
+    assert.ok(url.endsWith('/token'));
+    return Response.json({ status: 'authorized', access_token: 'test-token' });
+  });
+  let renderer;
+  await act(async () => { renderer = create(React.createElement(h.SettingsComponent, { api: { jsonStorage: h.storage } })); });
+  const button = (text: string) => renderer.root.findAllByType('design-button').find(node => node.props.text === text);
+  await act(async () => { button('Connect to CatGIFs').props.onPress(); });
+  assert.deepEqual(h.openedURLs, [approvalURL]);
+  assert.ok(button('Waiting for approval…').props.disabled);
+  assert.ok(button('Open approval page'));
+  assert.ok(renderer.root.findAllByType('design-text').some(node => node.props.children === approvalURL));
+  await act(async () => { mock.timers.tick(5000); });
+  assert.deepEqual(h.storage.cache.uploadConnection, { origin: 'https://catgifs.marni.cc', token: 'test-token' });
+  assert.ok(button('Manage connected devices'));
+  assert.equal(button('Open approval page'), undefined);
+  await act(async () => { renderer.unmount(); });
+});
+
+test('a stalled connection request shows a timeout and enables retry', async () => {
+  const h = harness();
+  mock.timers.enable({ apis: ['setTimeout'] });
+  mock.method(globalThis, 'fetch', (_url: string, options: RequestInit) => new Promise((_resolve, reject) => {
+    options.signal!.addEventListener('abort', () => reject(new Error('Aborted')), { once: true });
+  }));
+  let renderer;
+  await act(async () => { renderer = create(React.createElement(h.SettingsComponent, { api: { jsonStorage: h.storage } })); });
+  const button = (text: string) => renderer.root.findAllByType('design-button').find(node => node.props.text === text);
+  await act(async () => { button('Connect to CatGIFs').props.onPress(); });
+  assert.ok(button('Waiting for approval…').props.disabled);
+  await act(async () => { mock.timers.tick(20_000); });
+  assert.equal(button('Connect to CatGIFs').props.disabled, false);
+  assert.ok(renderer.root.findAllByType('design-text').some(node => String(node.props.children).includes('took too long')));
+  await act(async () => { renderer.unmount(); });
+});
+
+test('a failed browser launch leaves approval available and cancellation lets the user retry', async () => {
+  const h = harness();
+  mock.timers.enable({ apis: ['setTimeout'] });
+  let requests = 0;
+  mock.method(globalThis, 'fetch', async () => {
+    requests++;
+    return Response.json({ device_code: 'device-code', user_code: 'CAT-CODE',
+      verification_uri_complete: 'https://catgifs.marni.cc/settings/equicord?code=CAT-CODE', expires_in: 600, interval: 5 });
+  });
+  mock.method(h.browser, 'openURL', async () => { throw new Error('No browser'); });
+  let renderer;
+  await act(async () => { renderer = create(React.createElement(h.SettingsComponent, { api: { jsonStorage: h.storage } })); });
+  const button = (text: string) => renderer.root.findAllByType('design-button').find(node => node.props.text === text);
+  await act(async () => { button('Connect to CatGIFs').props.onPress(); });
+  assert.ok(button('Open approval page'));
+  assert.ok(renderer.root.findAllByType('design-text').some(node => String(node.props.children).includes('Could not open your browser')));
+  await act(async () => { button('Cancel connection').props.onPress(); });
+  assert.equal(button('Connect to CatGIFs').props.disabled, false);
+  assert.equal(button('Open approval page'), undefined);
+  await act(async () => { mock.timers.tick(10_000); });
+  assert.equal(requests, 1);
+  await act(async () => { button('Connect to CatGIFs').props.onPress(); });
+  assert.equal(requests, 2);
+  await act(async () => { renderer.unmount(); });
+});
+
+test('media action sheets gain one upload action and restore their loader on disable', async () => {
+  const h = harness();
+  h.start();
+  const NativeSheet = () => React.createElement('sheet', null,
+    React.createElement('section', null, [React.createElement('action-sheet-row', { key: 'copy', label: 'Copy link' })]),
+    React.createElement('section', null, [React.createElement('action-sheet-row', { key: 'save', label: 'Save' })]));
+  for (const key of ['MessageLongPressActionSheet', 'GIFPickerActionSheet', 'MediaActionSheet', 'UnrelatedActionSheet']) {
+    const props = { message: { attachments: [{ url: 'https://cdn.discordapp.com/cat.gif' }] } };
+    const loaded = await h.sheets.openLazy(() => Promise.resolve({ default: NativeSheet }), key, props);
+    assert.equal(loaded.props, props);
+    let renderer;
+    await act(async () => { renderer = create(React.createElement(loaded.module.default, props)); });
+    assert.equal(renderer.root.findAllByType('action-sheet-row').filter(node => node.props.label === 'Upload to CatGIFs').length,
+      key === 'UnrelatedActionSheet' ? 0 : 1);
+    await act(async () => { renderer.unmount(); });
+  }
+  const pending = h.sheets.openLazy(Promise.resolve({ default: NativeSheet }), 'MessageLongPressActionSheet',
+    { message: { attachments: [{ url: 'https://cdn.discordapp.com/cat.gif' }] } });
+  h.stop();
+  const loaded = await pending;
+  let renderer;
+  await act(async () => { renderer = create(React.createElement(loaded.module.default, loaded.props)); });
+  assert.equal(renderer.root.findAllByType('action-sheet-row').length, 2);
+  assert.equal(h.sheets.openLazy, h.originalOpenLazy);
+  await act(async () => { renderer.unmount(); });
+});
+
 test('embedded grid measures its parent, preserves GIF proportions, searches, and sends directly', async () => {
   const h = harness();
-  h.init();
+  h.start();
   let renderer;
   await act(async () => { renderer = create(React.createElement(h.Picker, h.props)); });
   await act(async () => { renderer.root.findByType('segmented-control').props.state.setActiveIndex(3); });
@@ -190,7 +347,7 @@ test('embedded grid measures its parent, preserves GIF proportions, searches, an
 test('expanding and collapsing uses the current scroll owner for native and fallback grids', async () => {
   for (const nativeListReady of [true, false]) {
     const h = harness({ nativeListReady });
-    h.init();
+    h.start();
     // The keyboard flag can stay true when its contents move into a sheet.
     const picker = React.createElement(h.Picker, { ...h.props, inPortalKeyboard: true });
     const tree = (sheet: object | null) => React.createElement(h.SheetContext.Provider, { value: sheet }, picker);
@@ -225,7 +382,7 @@ test('expanding and collapsing uses the current scroll owner for native and fall
 
 test('direct sending works without a chat input and never edits the draft', async () => {
   const h = harness();
-  h.init();
+  h.start();
   let renderer;
   await act(async () => { renderer = create(React.createElement(h.Picker, h.props)); });
   await act(async () => { renderer.root.findByType('segmented-control').props.state.setActiveIndex(3); });
@@ -244,7 +401,7 @@ test('direct sending works without a chat input and never edits the draft', asyn
 test('unavailable sends, changed chats, and synchronous failures show an error without closing', async () => {
   for (const failure of ['unavailable', 'channel', 'throw']) {
     const h = harness({ messagesReady: failure !== 'unavailable' });
-    h.init();
+    h.start();
     h.setSendResult(() => { throw new Error('Send failed synchronously'); });
     let renderer;
     await act(async () => { renderer = create(React.createElement(h.Picker, h.props)); });
@@ -267,7 +424,7 @@ test('unavailable sends, changed chats, and synchronous failures show an error w
 test('selection closes immediately and finishing the send never closes a subsequent picker', async () => {
   for (const change of ['reopen', 'channel', 'disable']) {
     const h = harness();
-    h.init();
+    h.start();
     const { promise, resolve } = Promise.withResolvers<void>();
     h.setSendResult(() => promise);
     let renderer;
@@ -299,7 +456,7 @@ test('selection closes immediately and finishing the send never closes a subsequ
 test('keep picker open applies while sending and after success or asynchronous failure', async () => {
   for (const fails of [false, true]) {
     const h = harness();
-    h.init();
+    h.start();
     h.storage.cache.keepPickerOpen = true;
     const { promise, resolve, reject } = Promise.withResolvers<void>();
     h.setSendResult(() => promise);
@@ -325,7 +482,7 @@ test('keep picker open applies while sending and after success or asynchronous f
 test('asynchronous failures after dismissal are caught without reopening or dismissing a new picker', async () => {
   for (const reopened of [false, true]) {
     const h = harness();
-    h.init();
+    h.start();
     const { promise, reject } = Promise.withResolvers<void>();
     const failure = new Error('Offline');
     h.setSendResult(() => promise);
@@ -355,7 +512,7 @@ test('asynchronous failures after dismissal are caught without reopening or dism
 
 test('first-use fallback has measured GIF heights and adopts the native list when it loads', async () => {
   const h = harness({ nativeListReady: false });
-  h.init();
+  h.start();
   let renderer;
   await act(async () => { renderer = create(React.createElement(h.Picker, h.props)); });
   await act(async () => { renderer.root.findByType('segmented-control').props.state.setActiveIndex(3); });
@@ -376,7 +533,7 @@ test('first-use fallback has measured GIF heights and adopts the native list whe
 
 test('deferred module callbacks cannot install a picker patch after disable', () => {
   const h = harness({ deferPicker: true });
-  h.init();
+  h.start();
   h.stop();
   h.finishPicker();
   assert.equal(h.Picker.type, h.original);

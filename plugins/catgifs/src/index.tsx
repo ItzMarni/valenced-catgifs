@@ -6,6 +6,7 @@ import { withProps } from '@valenced/modules/finders/filters';
 import { instead } from '@valenced/patcher';
 import ExtendedExpressionPicker from './ExpressionPicker';
 import SettingsComponent, { DEFAULT_SETTINGS } from './settings';
+import { installUploadMenu } from './UploadMenu';
 import type { NativePicker, PickerRuntime } from './ExpressionPicker';
 import type { Settings } from './settings';
 
@@ -28,7 +29,8 @@ interface SelectedChannel { getChannelId(): string | undefined }
 export default plugin<{ jsonStorage: Settings }>({
   jsonStorage: { load: true, default: DEFAULT_SETTINGS },
   SettingsComponent,
-  init({ cleanup, jsonStorage: storage, logger }) {
+  start({ cleanup, jsonStorage: storage, logger }) {
+    installUploadMenu(storage, cleanup);
     let inputs: ChatInputs | undefined;
     let messages: MessageActions | undefined;
     let selectedChannel: SelectedChannel | undefined;
